@@ -35,15 +35,15 @@ Agent 的配置文件路径。下面三类位置由不同层负责：
 
 ## 给普通用户和 Agent 的安装流程
 
-普通用户只需要在 iPhone 上使用 WhatSticks，并从 App 复制配置提示词。提示词会提供固定
-Release 的版本、下载地址、SHA-256、WebDAV 地址、远端目录和（如果用户愿意提供的）WebDAV
-用户名；第三方应用密码永远不进入提示词。
+普通用户只需要在 iPhone 上使用 WhatSticks，并从 App 复制配置提示词。提示词会提供最新
+Release 的稳定下载地址、WebDAV 地址、远端目录和（如果用户愿意提供的）WebDAV 用户名；
+第三方应用密码永远不进入提示词。
 
 Agent 应按以下顺序处理：
 
 1. 先识别自身的产品、版本、运行环境和 MCP 传输能力，并只读取该 Agent 的官方注册说明。
-2. 从固定 Release 地址下载 ZIP，校验 SHA-256；不要下载或执行 `main` 分支或其他地址的
-   未固定代码。
+2. 从下面的 GitHub Releases 稳定下载地址获取最新发布 ZIP；不要下载或执行 `main` 分支或
+   其他地址的未固定代码。解压后读取包内 `VERSION` 和 `README.md`，向用户报告实际版本。
 3. 选择用户级 Server 安装目录，并单独选择运行配置文件路径；不要把其中任何路径冒充成
    Agent 的官方目录。
 4. 运行包内正式的 `--setup` 流程。提示词中已给出的 WebDAV 地址、用户名和远端目录，以及 Agent
@@ -59,17 +59,15 @@ Agent 应按以下顺序处理：
 然后继续注册和验证；用户不需要再回复“setup 完成”。如果 Agent 无法提供安全的交互式输入，
 它应明确告诉用户在哪个终端或控制台输入，而不是声称已经完成。
 
-当前版本：`1.0.0`
+最新 Release 安装包：
+`https://github.com/panAtGitHub/WhatSticksMCP/releases/latest/download/WhatSticksMCP.zip`
 
-安装包：
-`https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.0/WhatSticksMCP-v1.0.0.zip`
-
-SHA-256：请下载同一发布页中的 `WhatSticksMCP-v1.0.0.sha256` 校验文件；调用方应固定
-记录该版本的 SHA-256。不要使用其他分支或其他地址的包。
+每个 Release 也会保留带版本号的 ZIP 和可选的 `.sha256` 校验文件，供需要固定版本或手动
+审计的场景使用；App 提示词只使用上面的稳定下载地址，不内置版本号或 SHA-256。
 
 ## 1.0.0 安全修复
 
-v1.0.0 修复了 macOS Keychain setup 的双重密码确认交互。`security` 命令仍使用不带密码值的
+当前发布版本修复了 macOS Keychain setup 的双重密码确认交互。`security` 命令仍使用不带密码值的
 `-w`，密码不会出现在命令参数、Shell 历史、日志或 JSON 配置中；setup 通过子进程标准输入
 提供两次密码确认。密码为空、确认交互失败、Keychain 权限拒绝和其他 Keychain 写入失败会给出
 不同的错误类别，错误信息不会回显密码。

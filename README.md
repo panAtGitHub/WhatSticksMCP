@@ -65,6 +65,9 @@ Agent 应按以下顺序处理：
 每个 Release 也会保留带版本号的 ZIP 和可选的 `.sha256` 校验文件，供需要固定版本或手动
 审计的场景使用；App 提示词只使用上面的稳定下载地址，不内置版本号或 SHA-256。
 
+发布维护者运行 `scripts/package_release.sh` 后，应将 `dist/WhatSticksMCP.zip` 作为每个
+Release 的稳定别名一并上传；这样已有 App 无需更新就能获取最新版本。
+
 ## 1.0.0 安全修复
 
 当前发布版本修复了 macOS Keychain setup 的双重密码确认交互。`security` 命令仍使用不带密码值的

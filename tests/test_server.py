@@ -204,6 +204,53 @@ class WhatSticksMCPTests(unittest.TestCase):
             with self.assertRaisesRegex(server.MCPError, "支持 macOS 和 Windows"):
                 server.credential_password(config)
 
+    def test_setup_accepts_non_sensitive_values_without_reprompting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "mcp.json"
+            with patch.object(server, "credential_backend_name", return_value="test secure store"), \
+                    patch.object(server.getpass, "getpass", return_value="secret"), \
+                    patch.object(server, "store_password") as store_password, \
+                    patch("builtins.input") as input_function:
+                result = server.main([
+                    "--setup",
+                    "--config",
+                    str(config_path),
+                    "--webdav-url",
+                    "https://dav.example.com/dav/",
+                    "--username",
+                    "user@example.com",
+                    "--remote-folder",
+                    "WhatSticks",
+                    "--cache-dir",
+                    str(Path(directory) / "cache"),
+                ])
+
+            self.assertEqual(result, 0)
+            input_function.assert_not_called()
+            store_password.assert_called_once_with(
+                "com.dusk.WhatSticks.webdav",
+                "user@example.com",
+                "secret",
+            )
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["webdavUrl"], "https://dav.example.com/dav/")
+            self.assertEqual(saved["username"], "user@example.com")
+            self.assertEqual(saved["remoteFolder"], "WhatSticks")
+            self.assertNotIn("password", saved)
+
+    def test_setup_help_exposes_only_non_sensitive_setup_arguments(self) -> None:
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with self.assertRaises(SystemExit) as exit_result:
+                server.main(["--help"])
+
+        self.assertEqual(exit_result.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("--webdav-url", help_text)
+        self.assertIn("--username", help_text)
+        self.assertIn("--remote-folder", help_text)
+        self.assertIn("--cache-dir", help_text)
+        self.assertNotIn("--password", help_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1062,16 +1062,36 @@ def store_password(service: str, username: str, password: str) -> None:
     raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
 
 
-def setup(config_path: Path) -> int:
+def setup(
+    config_path: Path,
+    *,
+    webdav_url: str | None = None,
+    username: str | None = None,
+    remote_folder: str | None = None,
+    cache_dir: str | None = None,
+) -> int:
     backend = credential_backend_name()
     if backend is None:
         raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
     default_cache = default_cache_dir()
     print(f"WhatSticks MCP WebDAV 配置（密码只写入 {backend}）", file=sys.stderr)
-    url = input("WebDAV HTTPS 地址 [https://dav.jianguoyun.com/dav/]: ").strip() or "https://dav.jianguoyun.com/dav/"
-    username = input("邮箱或用户名: ").strip()
-    folder = input("远端目录 [WhatSticks]: ").strip() or "WhatSticks"
-    cache_dir = input(f"本地缓存目录 [{default_cache}]: ").strip() or str(default_cache)
+    url = (
+        webdav_url.strip()
+        if webdav_url is not None
+        else input("WebDAV HTTPS 地址 [https://dav.jianguoyun.com/dav/]: ").strip()
+        or "https://dav.jianguoyun.com/dav/"
+    )
+    username = username.strip() if username is not None else input("邮箱或用户名: ").strip()
+    folder = (
+        remote_folder.strip()
+        if remote_folder is not None
+        else input("远端目录 [WhatSticks]: ").strip() or "WhatSticks"
+    )
+    cache_value = (
+        cache_dir.strip()
+        if cache_dir is not None
+        else input(f"本地缓存目录 [{default_cache}]: ").strip() or str(default_cache)
+    )
     password = getpass.getpass("第三方应用密码（不会写入配置文件）: ")
     parts = urlsplit(url)
     if parts.scheme.lower() != "https" or not parts.hostname or parts.username or parts.password:
@@ -1079,12 +1099,14 @@ def setup(config_path: Path) -> int:
     if not username:
         raise MCPError("用户名不能为空。")
     folder = normalized_folder(folder)
+    if not cache_value:
+        raise MCPError("本地缓存目录不能为空。")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config = {
         "webdavUrl": url,
         "username": username,
         "remoteFolder": folder,
-        "cacheDir": cache_dir,
+        "cacheDir": cache_value,
         "credentialService": "com.dusk.WhatSticks.webdav",
     }
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1097,10 +1119,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WhatSticks read-only WebDAV MCP server")
     parser.add_argument("--config", type=Path, default=default_config_path())
     parser.add_argument("--setup", action="store_true", help="交互式写入配置和当前系统的安全凭据")
+    parser.add_argument(
+        "--webdav-url",
+        help="setup 使用的 HTTPS WebDAV 地址；提供后不再重复询问",
+    )
+    parser.add_argument(
+        "--username",
+        help="setup 使用的 WebDAV 用户名；提供后不再重复询问（不是密码）",
+    )
+    parser.add_argument(
+        "--remote-folder",
+        help="setup 使用的远端目录；提供后不再重复询问",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        help="setup 使用的本地缓存目录；提供后不再重复询问",
+    )
     args = parser.parse_args(argv)
     try:
         if args.setup:
-            return setup(args.config.expanduser())
+            return setup(
+                args.config.expanduser(),
+                webdav_url=args.webdav_url,
+                username=args.username,
+                remote_folder=args.remote_folder,
+                cache_dir=args.cache_dir,
+            )
         return MCPServer(args.config.expanduser()).run()
     except (MCPError, EOFError, KeyboardInterrupt) as exc:
         print(str(exc), file=sys.stderr)

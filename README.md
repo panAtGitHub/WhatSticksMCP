@@ -4,7 +4,7 @@
 `current.json`、不可变 release、JSON 分片和媒体索引；不会调用 `PUT`、`DELETE`、
 `MOVE` 或 `MKCOL`，也不会把图片二进制塞进 MCP 文本输出。
 
-运行时只依赖 Python 3.11+ 标准库，不需要 `pip install`。生产配置保存地址、用户名、
+运行时只依赖 Python 3.9+ 标准库，不需要 `pip install`。生产配置保存地址、用户名、
 远端目录和缓存目录，第三方应用密码不写入 JSON 配置。
 
 ## 先分清三种位置
@@ -25,7 +25,7 @@ Agent 的配置文件路径。下面三类位置由不同层负责：
 
 ## 当前版本兼容性
 
-- Python 3.11 或更高版本。
+- Python 3.9 或更高版本。当前实现已在 Python 3.9.6 验证；3.8 及更低版本暂不声明支持。
 - 当前版本使用 macOS Keychain 保存第三方应用密码，因此 `--setup` 当前只支持 macOS；
   这是此版本 Server 的实现限制，不是 WhatSticks App 对用户运行环境的假设。
 - 当前版本是本地 stdio Server。目标 Agent 是否能使用它，必须由 Agent 根据自身官方文档
@@ -49,10 +49,10 @@ Agent 应按以下顺序处理：
 6. 验证 `initialize`、`tools/list` 和 `whatsticks_status`，最后报告实际运行环境、Server
    目录、运行配置路径、注册结果和验证结果。
 
-当前版本：`1.0.1`
+当前版本：`1.0.2`
 
 安装包：
-`https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.1/WhatSticksMCP-v1.0.1.zip`
+`https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.2/WhatSticksMCP-v1.0.2.zip`
 
 ## 手动运行 setup
 
@@ -60,8 +60,8 @@ Agent 应按以下顺序处理：
 实际路径：
 
 ```bash
-python3.11 \
-  /path/to/WhatSticksMCP-v1.0.1/server.py \
+python3 \
+  /path/to/WhatSticksMCP-v1.0.2/server.py \
   --setup \
   --config /path/to/whatsticks-runtime.json
 ```
@@ -88,7 +88,7 @@ python3.11 \
 
 ```text
 transport: stdio
-command: <Python 3.11 executable>
+command: <Python 3.9 or newer executable>
 args:
   - <path to server.py>
   - --config
@@ -105,7 +105,7 @@ name: whatsticks
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | python3.11 \
+  | python3 \
       /path/to/server.py \
       --config /path/to/whatsticks-runtime.json
 ```

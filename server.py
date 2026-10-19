@@ -510,8 +510,10 @@ class MirrorRepository:
             "sourceDeviceID": snapshot.current["deviceID"],
             "sourceAppVersion": snapshot.release.get("sourceAppVersion"),
             "entityCounts": snapshot.release.get("entityCounts", {}),
+            "nonDeletedEntityCounts": non_deleted_entity_counts(snapshot.records),
             "partitionCount": len(snapshot.release["partitions"]),
             "mediaCount": len(snapshot.release.get("media", [])),
+            "relationIntegrity": relation_integrity(snapshot),
             "cache": {
                 "state": "stale" if snapshot.stale else "latest",
                 "error": snapshot.cache_error,
@@ -538,25 +540,103 @@ def is_deleted(record: dict[str, Any]) -> bool:
     return record.get("deletedAt") is not None
 
 
-def project_output(project: dict[str, Any], trace_count: int) -> dict[str, Any]:
+def record_map(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {
-        "id": project.get("id"),
-        "title": project.get("title", ""),
-        "status": "deleted" if is_deleted(project) else "archived" if project.get("archivedAt") else "active",
-        "updatedAt": project.get("updatedAt"),
-        "archivedAt": project.get("archivedAt"),
-        "deletedAt": project.get("deletedAt"),
-        "traceCount": trace_count,
-        "lifeDimensionID": project.get("lifeDimensionID"),
+        str(record.get("id")): record
+        for record in records
+        if record.get("id") is not None
     }
 
 
-def trace_output(trace: dict[str, Any], project: dict[str, Any] | None, *, include_text: bool = False) -> dict[str, Any]:
+def non_deleted_entity_counts(records: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    return {
+        name: sum(1 for record in values if not is_deleted(record))
+        for name, values in records.items()
+    }
+
+
+def dimension_output(dimension: dict[str, Any] | None) -> dict[str, Any] | None:
+    if dimension is None:
+        return None
+    return {
+        "id": dimension.get("id"),
+        "name": dimension.get("name"),
+        "iconName": dimension.get("iconName"),
+        "colorName": dimension.get("colorName"),
+        "sortOrder": dimension.get("sortOrder"),
+        "isSystem": dimension.get("isSystem"),
+        "status": "deleted" if is_deleted(dimension) else "active",
+        "createdAt": dimension.get("createdAt"),
+        "updatedAt": dimension.get("updatedAt"),
+        "deletedAt": dimension.get("deletedAt"),
+    }
+
+
+def latest_grid_names(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for record in records:
+        grid_id = record.get("gridID")
+        if grid_id is None:
+            continue
+        key = str(grid_id)
+        previous = result.get(key)
+        if previous is None or str(record.get("updatedAt") or "") >= str(previous.get("updatedAt") or ""):
+            result[key] = record
+    return result
+
+
+def grid_name(record: dict[str, Any] | None) -> str | None:
+    return record.get("name") if record else None
+
+
+def project_output(
+    project: dict[str, Any],
+    trace_count: int,
+    dimensions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    dimension_id = project.get("lifeDimensionID")
+    dimension = dimensions.get(str(dimension_id)) if dimensions and dimension_id else None
+    output = {
+        "id": project.get("id"),
+        "title": project.get("title", ""),
+        "note": project.get("note"),
+        "systemKey": project.get("systemKey"),
+        "isInbox": project.get("systemKey") == "inbox",
+        "isPinned": project.get("isPinned"),
+        "status": "deleted" if is_deleted(project) else "archived" if project.get("archivedAt") else "active",
+        "createdAt": project.get("createdAt"),
+        "updatedAt": project.get("updatedAt"),
+        "activityAt": project.get("activityAt"),
+        "latestTraceAt": project.get("latestTraceAt"),
+        "latestTraceID": project.get("latestTraceID"),
+        "latestTracePreview": project.get("latestTracePreview"),
+        "archivedAt": project.get("archivedAt"),
+        "deletedAt": project.get("deletedAt"),
+        "traceCount": trace_count,
+        "lifeDimensionID": dimension_id,
+        "lifeDimension": dimension_output(dimension),
+    }
+    if dimension_id and dimension is None:
+        output["lifeDimension"] = {"id": dimension_id, "missing": True}
+    return output
+
+
+def trace_output(
+    trace: dict[str, Any],
+    project: dict[str, Any] | None,
+    dimensions: dict[str, dict[str, Any]] | None = None,
+    *,
+    include_text: bool = False,
+) -> dict[str, Any]:
     text = str(trace.get("text", ""))
+    dimension_id = project.get("lifeDimensionID") if project else None
+    dimension = dimensions.get(str(dimension_id)) if dimensions and dimension_id else None
     output = {
         "id": trace.get("id"),
         "projectID": trace.get("projectID"),
         "projectTitle": project.get("title") if project else None,
+        "lifeDimensionID": dimension_id,
+        "lifeDimension": dimension_output(dimension),
         "textPreview": trace.get("textPreview") or text[:240],
         "contentKind": trace.get("contentKindRawValue"),
         "createdAt": trace.get("createdAt"),
@@ -564,10 +644,146 @@ def trace_output(trace: dict[str, Any], project: dict[str, Any] | None, *, inclu
         "deletedAt": trace.get("deletedAt"),
         "primaryAssetID": trace.get("primaryAssetID"),
     }
+    if dimension_id and dimension is None:
+        output["lifeDimension"] = {"id": dimension_id, "missing": True}
     if include_text:
         output["text"] = text[:MAX_TRACE_TEXT]
         output["textTruncated"] = len(text) > MAX_TRACE_TEXT
     return output
+
+
+def relation_integrity(snapshot: Snapshot) -> dict[str, Any]:
+    records = snapshot.records
+    projects = record_map(records.get("projects", []))
+    traces = record_map(records.get("traces", []))
+    dimensions = record_map(records.get("lifeDimensions", []))
+    grids = record_map(records.get("lifeGrids", []))
+    media_assets = record_map(records.get("mediaAssets", []))
+    media_items = {
+        str(item.get("assetID", "")).lower(): item
+        for item in snapshot.release.get("media", [])
+        if item.get("assetID") is not None
+    }
+    shared_links = record_map(records.get("sharedLinks", []))
+    daily_practices = record_map(records.get("dailyPractices", []))
+    activity_metrics = record_map(records.get("activityMetrics", []))
+
+    issues: dict[str, dict[str, Any]] = {}
+
+    def add_issue(name: str, identifiers: Iterable[Any]) -> None:
+        values = [str(identifier) for identifier in identifiers if identifier is not None]
+        if values:
+            issues[name] = {
+                "count": len(values),
+                "sampleIDs": values[:20],
+            }
+
+    unassigned_projects = 0
+    projects_with_unknown_dimension: list[Any] = []
+    projects_with_deleted_dimension: list[Any] = []
+    for project in projects.values():
+        if is_deleted(project):
+            continue
+        dimension_id = project.get("lifeDimensionID")
+        if dimension_id is None:
+            unassigned_projects += 1
+        elif str(dimension_id) not in dimensions:
+            projects_with_unknown_dimension.append(project.get("id"))
+        elif is_deleted(dimensions[str(dimension_id)]):
+            projects_with_deleted_dimension.append(project.get("id"))
+    add_issue("projectsWithUnknownDimension", projects_with_unknown_dimension)
+    add_issue("projectsWithDeletedDimension", projects_with_deleted_dimension)
+
+    traces_with_unknown_project: list[Any] = []
+    traces_with_deleted_project: list[Any] = []
+    for trace in traces.values():
+        if is_deleted(trace):
+            continue
+        project_id = str(trace.get("projectID"))
+        if project_id not in projects:
+            traces_with_unknown_project.append(trace.get("id"))
+        elif is_deleted(projects[project_id]):
+            traces_with_deleted_project.append(trace.get("id"))
+    add_issue("tracesWithUnknownProject", traces_with_unknown_project)
+    add_issue("tracesWithDeletedProject", traces_with_deleted_project)
+
+    grid_slots_with_unknown_grid: list[Any] = []
+    grid_slots_with_unknown_dimension: list[Any] = []
+    for slot in records.get("lifeGridSlots", []):
+        if str(slot.get("gridID")) not in grids:
+            grid_slots_with_unknown_grid.append(slot.get("id"))
+        if str(slot.get("lifeDimensionID")) not in dimensions:
+            grid_slots_with_unknown_dimension.append(slot.get("id"))
+    add_issue("gridSlotsWithUnknownGrid", grid_slots_with_unknown_grid)
+    add_issue("gridSlotsWithUnknownDimension", grid_slots_with_unknown_dimension)
+
+    grid_names_with_unknown_grid = [
+        name.get("id")
+        for name in records.get("lifeGridNames", [])
+        if str(name.get("gridID")) not in grids
+    ]
+    add_issue("gridNamesWithUnknownGrid", grid_names_with_unknown_grid)
+
+    media_asset_ids = {str(asset_id).lower() for asset_id in media_assets}
+    media_assets_without_file = [
+        asset.get("id")
+        for asset in media_assets.values()
+        if not is_deleted(asset) and asset.get("mediaPath") and str(asset.get("id")).lower() not in media_items
+    ]
+    media_items_without_asset = [
+        item.get("assetID")
+        for asset_id, item in media_items.items()
+        if asset_id not in media_asset_ids
+    ]
+    add_issue("mediaAssetsWithoutPublishedFile", media_assets_without_file)
+    add_issue("publishedMediaWithoutAsset", media_items_without_asset)
+
+    daily_entries_with_unknown_target: list[Any] = []
+    for entry in records.get("dailyPracticeEntries", []):
+        kind = entry.get("kindRawValue")
+        target_id = str(entry.get("targetID"))
+        target_map = projects if kind == "project" else shared_links if kind == "sharedLink" else {}
+        if target_id not in target_map:
+            daily_entries_with_unknown_target.append(entry.get("id"))
+    add_issue("dailyEntriesWithUnknownTarget", daily_entries_with_unknown_target)
+
+    daily_days_with_unknown_practice = [
+        day.get("id")
+        for day in records.get("dailyPracticeDays", [])
+        if str(day.get("practiceID")) not in daily_practices
+    ]
+    add_issue("dailyDaysWithUnknownPractice", daily_days_with_unknown_practice)
+
+    activity_events_with_unknown_project: list[Any] = []
+    activity_events_with_unknown_metric: list[Any] = []
+    for event in records.get("activityEvents", []):
+        if str(event.get("projectID")) not in projects:
+            activity_events_with_unknown_project.append(event.get("id"))
+        if str(event.get("metricID")) not in activity_metrics:
+            activity_events_with_unknown_metric.append(event.get("id"))
+    add_issue("activityEventsWithUnknownProject", activity_events_with_unknown_project)
+    add_issue("activityEventsWithUnknownMetric", activity_events_with_unknown_metric)
+
+    focus_sessions_with_unknown_project = [
+        session.get("id")
+        for session in records.get("focusSessions", [])
+        if str(session.get("projectID")) not in projects
+    ]
+    add_issue("focusSessionsWithUnknownProject", focus_sessions_with_unknown_project)
+
+    trace_metrics_with_unknown_trace = [
+        metric.get("id")
+        for metric in records.get("traceMetrics", [])
+        if str(metric.get("traceID")) not in traces
+    ]
+    add_issue("traceMetricsWithUnknownTrace", trace_metrics_with_unknown_trace)
+
+    return {
+        "status": "ok" if not issues else "warning",
+        "unassignedProjects": unassigned_projects,
+        "issues": issues,
+        "checkedPartitions": sorted(records),
+    }
 
 
 def tool_definitions() -> list[dict[str, Any]]:
@@ -584,6 +800,29 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": schema({}),
         },
         {
+            "name": "whatsticks_validate_snapshot",
+            "description": "校验当前镜像的实体关联，报告未分配项目和缺失关联；只读。",
+            "inputSchema": schema({}),
+        },
+        {
+            "name": "whatsticks_list_dimensions",
+            "description": "列出生活维度、项目数量和九宫格槽位关联；只读。",
+            "inputSchema": schema({
+                "includeDeleted": {"type": "boolean"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "cursor": {"type": "string"},
+            }),
+        },
+        {
+            "name": "whatsticks_list_grids",
+            "description": "列出生活九宫格及其命名、槽位和生活维度关联；只读。",
+            "inputSchema": schema({
+                "includeDeleted": {"type": "boolean"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "cursor": {"type": "string"},
+            }),
+        },
+        {
             "name": "whatsticks_list_projects",
             "description": "按名称或备注搜索项目；默认排除已删除和已归档项目。",
             "inputSchema": schema({
@@ -592,6 +831,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "cursor": {"type": "string"},
             }),
+        },
+        {
+            "name": "whatsticks_get_project",
+            "description": "按 ID 读取项目的完整元数据、生活维度关联和时间摘要；只读。",
+            "inputSchema": schema({"projectID": {"type": "string"}}, ["projectID"]),
         },
         {
             "name": "whatsticks_search_traces",
@@ -646,7 +890,11 @@ class ToolService:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         handlers = {
             "whatsticks_status": self.status,
+            "whatsticks_validate_snapshot": self.validate_snapshot,
+            "whatsticks_list_dimensions": self.list_dimensions,
+            "whatsticks_list_grids": self.list_grids,
             "whatsticks_list_projects": self.list_projects,
+            "whatsticks_get_project": self.get_project,
             "whatsticks_search_traces": self.search_traces,
             "whatsticks_get_trace": self.get_trace,
             "whatsticks_project_timeline": self.project_timeline,
@@ -660,8 +908,99 @@ class ToolService:
     def status(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return self.repository.status()
 
+    def validate_snapshot(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self.repository.load()
+        result = self.repository.status()
+        result["relationIntegrity"] = relation_integrity(snapshot)
+        return result
+
+    def list_dimensions(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        dimensions = record_map(self.repository.records("lifeDimensions"))
+        projects = self.repository.records("projects")
+        slots = self.repository.records("lifeGridSlots")
+        grids = record_map(self.repository.records("lifeGrids"))
+        names = latest_grid_names(self.repository.records("lifeGridNames"))
+        project_counts: dict[str, int] = {}
+        for project in projects:
+            if is_deleted(project):
+                continue
+            dimension_id = project.get("lifeDimensionID")
+            if dimension_id is not None:
+                key = str(dimension_id)
+                project_counts[key] = project_counts.get(key, 0) + 1
+
+        include_deleted = bool(arguments.get("includeDeleted", False))
+        output = []
+        for dimension in dimensions.values():
+            if is_deleted(dimension) and not include_deleted:
+                continue
+            dimension_id = str(dimension.get("id"))
+            grid_slots = []
+            for slot in slots:
+                if str(slot.get("lifeDimensionID")) != dimension_id:
+                    continue
+                grid = grids.get(str(slot.get("gridID")))
+                grid_slots.append({
+                    "gridID": slot.get("gridID"),
+                    "gridName": grid_name(names.get(str(slot.get("gridID")))),
+                    "gridStatus": "missing" if grid is None else "deleted" if is_deleted(grid) else "active",
+                    "position": slot.get("position"),
+                    "slotID": slot.get("id"),
+                })
+            item = dimension_output(dimension) or {"id": dimension.get("id")}
+            item["projectCount"] = project_counts.get(dimension_id, 0)
+            item["gridSlots"] = sorted(
+                grid_slots,
+                key=lambda value: (int(value.get("position") or 0), str(value.get("gridID") or "")),
+            )
+            output.append(item)
+        output.sort(key=lambda item: (int(item.get("sortOrder") or 0), str(item.get("id") or "")))
+        page, next_cursor = paginate(output, arguments)
+        return {"dimensions": page, "nextCursor": next_cursor}
+
+    def list_grids(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        grids = record_map(self.repository.records("lifeGrids"))
+        dimensions = record_map(self.repository.records("lifeDimensions"))
+        names = latest_grid_names(self.repository.records("lifeGridNames"))
+        slots = self.repository.records("lifeGridSlots")
+        include_deleted = bool(arguments.get("includeDeleted", False))
+        output = []
+        for grid in grids.values():
+            if is_deleted(grid) and not include_deleted:
+                continue
+            grid_id = str(grid.get("id"))
+            slot_output = []
+            for slot in slots:
+                if str(slot.get("gridID")) != grid_id:
+                    continue
+                dimension = dimensions.get(str(slot.get("lifeDimensionID")))
+                slot_output.append({
+                    "id": slot.get("id"),
+                    "position": slot.get("position"),
+                    "lifeDimensionID": slot.get("lifeDimensionID"),
+                    "lifeDimension": dimension_output(dimension),
+                    "missingLifeDimension": dimension is None,
+                })
+            output.append({
+                "id": grid.get("id"),
+                "name": grid_name(names.get(grid_id)),
+                "sortOrder": grid.get("sortOrder"),
+                "status": "deleted" if is_deleted(grid) else "active",
+                "createdAt": grid.get("createdAt"),
+                "updatedAt": grid.get("updatedAt"),
+                "deletedAt": grid.get("deletedAt"),
+                "slots": sorted(
+                    slot_output,
+                    key=lambda value: (int(value.get("position") or 0), str(value.get("id") or "")),
+                ),
+            })
+        output.sort(key=lambda item: (int(item.get("sortOrder") or 0), str(item.get("id") or "")))
+        page, next_cursor = paginate(output, arguments)
+        return {"grids": page, "nextCursor": next_cursor}
+
     def list_projects(self, arguments: dict[str, Any]) -> dict[str, Any]:
         project_map, traces = project_records(self.repository)
+        dimensions = record_map(self.repository.records("lifeDimensions"))
         active_counts: dict[str, int] = {}
         for trace in traces:
             if not is_deleted(trace):
@@ -676,16 +1015,55 @@ class ToolService:
             searchable = f"{project.get('title', '')}\n{project.get('note') or ''}".casefold()
             if query and query not in searchable:
                 continue
-            projects.append(project_output(project, active_counts.get(str(project.get("id")), 0)))
+            projects.append(project_output(project, active_counts.get(str(project.get("id")), 0), dimensions))
         projects.sort(key=lambda item: (str(item.get("updatedAt") or ""), str(item.get("id") or "")), reverse=True)
         page, next_cursor = paginate(projects, arguments)
         return {"projects": page, "nextCursor": next_cursor}
+
+    def get_project(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(arguments.get("projectID", "")).strip()
+        if not project_id:
+            raise MCPError("projectID 不能为空。")
+        project_map, traces = project_records(self.repository)
+        project = project_map.get(project_id)
+        if project is None:
+            raise MCPError("找不到指定项目。")
+        dimensions = record_map(self.repository.records("lifeDimensions"))
+        active_traces = [
+            trace for trace in traces
+            if str(trace.get("projectID")) == project_id and not is_deleted(trace)
+        ]
+        trace_dates = sorted(
+            str(trace.get("createdAt"))
+            for trace in active_traces
+            if trace.get("createdAt")
+        )
+        text_count = sum(
+            1 for trace in active_traces
+            if trace.get("contentKindRawValue") in {"text", "mixed"}
+        )
+        photo_count = sum(
+            1 for trace in active_traces
+            if trace.get("primaryAssetID") is not None
+        )
+        return {
+            "project": project_output(project, len(active_traces), dimensions),
+            "traceSummary": {
+                "firstCreatedAt": trace_dates[0] if trace_dates else None,
+                "lastCreatedAt": trace_dates[-1] if trace_dates else None,
+                "textOrMixedCount": text_count,
+                "mediaLinkedCount": photo_count,
+                "traceIDs": [trace.get("id") for trace in active_traces[:MAX_LIMIT]],
+                "traceIDsTruncated": len(active_traces) > MAX_LIMIT,
+            },
+        }
 
     def search_traces(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query", "")).casefold().strip()
         if not query:
             raise MCPError("query 不能为空。")
         project_map, _ = project_records(self.repository)
+        dimensions = record_map(self.repository.records("lifeDimensions"))
         project_id = arguments.get("projectID")
         from_value = parse_datetime(arguments.get("from"))
         to_value = parse_datetime(arguments.get("to"), end_of_day=True)
@@ -704,7 +1082,7 @@ class ToolService:
             haystack = f"{trace.get('text', '')}\n{trace.get('textPreview', '')}\n{project.get('title', '')}".casefold()
             if query not in haystack:
                 continue
-            matches.append(trace_output(trace, project))
+            matches.append(trace_output(trace, project, dimensions))
         matches.sort(key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")), reverse=True)
         page, next_cursor = paginate(matches, arguments)
         return {
@@ -719,11 +1097,16 @@ class ToolService:
         if not trace_id:
             raise MCPError("traceID 不能为空。")
         project_map, _ = project_records(self.repository)
+        dimensions = record_map(self.repository.records("lifeDimensions"))
         trace = next((item for item in self.repository.records("traces") if str(item.get("id")) == trace_id), None)
         if trace is None:
             raise MCPError("找不到指定痕迹。")
         project = project_map.get(str(trace.get("projectID")))
-        output = trace_output(trace, project, include_text=True)
+        output = trace_output(trace, project, dimensions, include_text=True)
+        output["metrics"] = [
+            metric for metric in self.repository.records("traceMetrics")
+            if str(metric.get("traceID")) == trace_id
+        ]
         asset_id = trace.get("primaryAssetID")
         if asset_id:
             asset = next((item for item in self.repository.records("mediaAssets") if str(item.get("id")) == str(asset_id)), None)
@@ -736,6 +1119,7 @@ class ToolService:
                 "height": asset.get("height") if asset else None,
                 "sha256": media_item.get("sha256") if media_item else None,
                 "sizeBytes": media_item.get("sizeBytes") if media_item else None,
+                "path": media_item.get("path") if media_item else None,
             }
         else:
             output["media"] = None
@@ -746,6 +1130,7 @@ class ToolService:
         if not project_id:
             raise MCPError("projectID 不能为空。")
         project_map, _ = project_records(self.repository)
+        dimensions = record_map(self.repository.records("lifeDimensions"))
         project = project_map.get(project_id)
         if project is None or is_deleted(project):
             raise MCPError("找不到指定项目，或项目已删除。")
@@ -760,7 +1145,7 @@ class ToolService:
                 continue
             if to_value and (created is None or created > to_value):
                 continue
-            item = trace_output(trace, project)
+            item = trace_output(trace, project, dimensions)
             item["kind"] = "trace"
             item["occurredAt"] = trace.get("createdAt")
             items.append(item)
@@ -784,10 +1169,32 @@ class ToolService:
                 "occurredAt": event.get("occurredAt"),
                 "dayKey": event.get("dayKey"),
             })
+        for session in self.repository.records("focusSessions"):
+            if str(session.get("projectID")) != project_id or is_deleted(session):
+                continue
+            occurred = record_datetime(session, "startedAt")
+            if from_value and (occurred is None or occurred < from_value):
+                continue
+            if to_value and (occurred is None or occurred > to_value):
+                continue
+            items.append({
+                "kind": "focus",
+                "id": session.get("id"),
+                "projectID": project_id,
+                "toolID": session.get("toolID"),
+                "targetMetricID": session.get("targetMetricID"),
+                "plannedDurationSeconds": session.get("plannedDurationSeconds"),
+                "actualDurationSeconds": session.get("actualDurationSeconds"),
+                "startedAt": session.get("startedAt"),
+                "endedAt": session.get("endedAt"),
+                "status": session.get("statusRawValue"),
+                "activityEventID": session.get("activityEventID"),
+                "occurredAt": session.get("startedAt"),
+            })
         items.sort(key=lambda item: (str(item.get("occurredAt") or ""), str(item.get("id") or "")), reverse=True)
         page, next_cursor = paginate(items, arguments)
         return {
-            "project": project_output(project, sum(1 for item in items if item.get("kind") == "trace")),
+            "project": project_output(project, sum(1 for item in items if item.get("kind") == "trace"), dimensions),
             "timeSemantics": "from/to are interpreted as UTC timestamps or UTC calendar-day bounds.",
             "items": page,
             "nextCursor": next_cursor,
@@ -796,17 +1203,29 @@ class ToolService:
     def list_daily_practices(self, arguments: dict[str, Any]) -> dict[str, Any]:
         include_archived = bool(arguments.get("includeArchived", False))
         project_map, _ = project_records(self.repository)
+        dimensions = record_map(self.repository.records("lifeDimensions"))
         links = {str(item.get("id")): item for item in self.repository.records("sharedLinks")}
         entries_by_practice: dict[str, list[dict[str, Any]]] = {}
         for entry in self.repository.records("dailyPracticeEntries"):
             target_id = str(entry.get("targetID"))
             kind = entry.get("kindRawValue")
             target = project_map.get(target_id) if kind == "project" else links.get(target_id)
+            target_dimension = None
+            if kind == "project" and target is not None:
+                dimension_id = target.get("lifeDimensionID")
+                target_dimension = dimension_output(dimensions.get(str(dimension_id))) if dimension_id else None
             entries_by_practice.setdefault(str(entry.get("practiceID")), []).append({
                 "id": entry.get("id"),
                 "kind": kind,
                 "targetID": entry.get("targetID"),
                 "targetName": target.get("title") if target else None,
+                "targetStatus": (
+                    "missing" if target is None
+                    else "deleted" if is_deleted(target)
+                    else "archived" if target.get("archivedAt")
+                    else "active"
+                ),
+                "targetLifeDimension": target_dimension,
                 "sortOrder": entry.get("sortOrder"),
             })
         practices = []
@@ -865,6 +1284,8 @@ class ToolService:
                     "date": cursor.isoformat(),
                     "isCompleted": bool(record and record.get("isCompleted")),
                     "completedAt": record.get("completedAt") if record else None,
+                    "recordCreatedAt": record.get("createdAt") if record else None,
+                    "recordUpdatedAt": record.get("updatedAt") if record else None,
                     "recordID": record.get("id") if record else None,
                 })
                 cursor += dt.timedelta(days=1)

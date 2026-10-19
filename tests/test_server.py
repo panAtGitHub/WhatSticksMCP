@@ -33,12 +33,27 @@ def make_fixture() -> dict[str, bytes]:
     project_id = "00000000-0000-0000-0000-000000000001"
     trace_id = "00000000-0000-0000-0000-000000000002"
     practice_id = "00000000-0000-0000-0000-000000000003"
+    dimension_id = "00000000-0000-0000-0000-000000000006"
+    grid_id = "00000000-0000-0000-0000-000000000007"
+    slot_id = "00000000-0000-0000-0000-000000000008"
+    trace_metric_id = "00000000-0000-0000-0000-000000000009"
+    activity_metric_id = "00000000-0000-0000-0000-000000000010"
+    activity_event_id = "00000000-0000-0000-0000-000000000011"
+    focus_session_id = "00000000-0000-0000-0000-000000000012"
     records = {
         "projects": [{
             "id": project_id,
             "title": "阅读与学习",
             "note": "中文 MCP 测试",
+            "systemKey": None,
+            "lifeDimensionID": dimension_id,
+            "isPinned": True,
+            "createdAt": "2026-10-18T03:00:00.000Z",
             "updatedAt": "2026-10-19T04:00:00.000Z",
+            "activityAt": "2026-10-19T03:00:00.000Z",
+            "latestTraceAt": "2026-10-19T03:00:00.000Z",
+            "latestTraceID": trace_id,
+            "latestTracePreview": "WS-MCP-20261019 今天完成中文检索验收",
             "archivedAt": None,
             "deletedAt": None,
         }],
@@ -52,6 +67,47 @@ def make_fixture() -> dict[str, bytes]:
             "updatedAt": "2026-10-19T03:00:00.000Z",
             "primaryAssetID": None,
             "deletedAt": None,
+        }],
+        "lifeDimensions": [{
+            "id": dimension_id,
+            "name": "学习",
+            "iconName": "book",
+            "colorName": "blue",
+            "sortOrder": 1,
+            "isSystem": True,
+            "createdAt": "2026-10-01T00:00:00.000Z",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+            "deletedAt": None,
+        }],
+        "lifeGrids": [{
+            "id": grid_id,
+            "sortOrder": 0,
+            "createdAt": "2026-10-01T00:00:00.000Z",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+            "deletedAt": None,
+        }],
+        "lifeGridNames": [{
+            "id": "00000000-0000-0000-0000-000000000013",
+            "gridID": grid_id,
+            "name": "我的生活",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+        }],
+        "lifeGridSlots": [{
+            "id": slot_id,
+            "gridID": grid_id,
+            "lifeDimensionID": dimension_id,
+            "position": 1,
+            "createdAt": "2026-10-01T00:00:00.000Z",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+        }],
+        "traceMetrics": [{
+            "id": trace_metric_id,
+            "traceID": trace_id,
+            "name": "页数",
+            "valueNumber": 20,
+            "valueText": None,
+            "unit": "页",
+            "createdAt": "2026-10-19T03:00:00.000Z",
         }],
         "dailyPractices": [{
             "id": practice_id,
@@ -67,8 +123,45 @@ def make_fixture() -> dict[str, bytes]:
         ],
         "dailyPracticeEntries": [],
         "mediaAssets": [],
-        "activityMetrics": [],
-        "activityEvents": [],
+        "activityMetrics": [{
+            "id": activity_metric_id,
+            "projectID": project_id,
+            "name": "阅读分钟",
+            "valueKindRawValue": "duration",
+            "displayUnitRawValue": "minute",
+            "customUnitLabel": None,
+            "sortOrder": 0,
+            "createdAt": "2026-10-19T02:00:00.000Z",
+            "updatedAt": "2026-10-19T02:00:00.000Z",
+            "archivedAt": None,
+        }],
+        "activityEvents": [{
+            "id": activity_event_id,
+            "projectID": project_id,
+            "metricID": activity_metric_id,
+            "valueBase": 30,
+            "occurredAt": "2026-10-19T03:00:00.000Z",
+            "dayKey": 20261019,
+            "sourceKindRawValue": "manual",
+            "createdAt": "2026-10-19T03:00:00.000Z",
+            "updatedAt": "2026-10-19T03:00:00.000Z",
+            "deletedAt": None,
+        }],
+        "focusSessions": [{
+            "id": focus_session_id,
+            "projectID": project_id,
+            "toolID": None,
+            "targetMetricID": activity_metric_id,
+            "plannedDurationSeconds": 1800,
+            "actualDurationSeconds": 1500,
+            "startedAt": "2026-10-19T02:30:00.000Z",
+            "endedAt": "2026-10-19T02:55:00.000Z",
+            "statusRawValue": "completed",
+            "activityEventID": activity_event_id,
+            "createdAt": "2026-10-19T02:30:00.000Z",
+            "updatedAt": "2026-10-19T02:55:00.000Z",
+            "deletedAt": None,
+        }],
         "sharedLinks": [],
     }
     files: dict[str, bytes] = {}
@@ -117,7 +210,7 @@ def make_fixture() -> dict[str, bytes]:
 
 
 class WhatSticksMCPTests(unittest.TestCase):
-    def make_repository(self) -> tuple[server.MirrorRepository, tempfile.TemporaryDirectory[str]]:
+    def make_repository(self, *, include_orphan: bool = False) -> tuple[server.MirrorRepository, tempfile.TemporaryDirectory[str]]:
         cache = tempfile.TemporaryDirectory()
         config = server.ServerConfig(
             webdav_url="https://fixture.invalid/dav/",
@@ -127,7 +220,35 @@ class WhatSticksMCPTests(unittest.TestCase):
             credential_service="fixture",
         )
         repository = server.MirrorRepository(config, "not-used")
-        repository.reader = FixtureReader(make_fixture())  # type: ignore[assignment]
+        fixture = make_fixture()
+        if include_orphan:
+            current = json.loads(fixture["current.json"])
+            release = json.loads(fixture[current["releasePath"]])
+            trace_partition = next(item for item in release["partitions"] if item["logicalPartition"] == "traces")
+            trace_data = json.loads(fixture[trace_partition["path"]])
+            trace_data["records"].append({
+                "id": "00000000-0000-0000-0000-000000000099",
+                "projectID": "00000000-0000-0000-0000-000000000098",
+                "text": "孤立痕迹",
+                "textPreview": "孤立痕迹",
+                "contentKindRawValue": "text",
+                "createdAt": "2026-10-19T05:00:00.000Z",
+                "updatedAt": "2026-10-19T05:00:00.000Z",
+                "primaryAssetID": None,
+                "deletedAt": None,
+            })
+            trace_bytes = server.json_bytes(trace_data)
+            trace_partition["sha256"] = server.sha256(trace_bytes)
+            trace_partition["sizeBytes"] = len(trace_bytes)
+            trace_partition["recordCount"] = len(trace_data["records"])
+            trace_partition["path"] = f"data/traces/{trace_partition['sha256']}.json"
+            fixture[trace_partition["path"]] = trace_bytes
+            release["entityCounts"]["traces"] = trace_partition["recordCount"]
+            release_bytes = server.json_bytes(release)
+            fixture[current["releasePath"]] = release_bytes
+            current["releaseSHA256"] = server.sha256(release_bytes)
+            fixture["current.json"] = server.json_bytes(current)
+        repository.reader = FixtureReader(fixture)  # type: ignore[assignment]
         return repository, cache
 
     def test_fixture_loads_chinese_search_and_daily_final_state(self) -> None:
@@ -142,6 +263,48 @@ class WhatSticksMCPTests(unittest.TestCase):
         stats = service.daily_stats({"from": "20261018", "to": "20261019"})
         self.assertEqual(stats["practices"][0]["completedDays"], 1)
         self.assertEqual(stats["practices"][0]["denominatorDays"], 2)
+
+    def test_relations_expose_dimension_grid_and_project_metadata(self) -> None:
+        repository, cache = self.make_repository()
+        self.addCleanup(cache.cleanup)
+        service = server.ToolService(repository)
+
+        dimensions = service.list_dimensions({"limit": 100})
+        self.assertEqual(dimensions["dimensions"][0]["name"], "学习")
+        self.assertEqual(dimensions["dimensions"][0]["projectCount"], 1)
+        self.assertEqual(dimensions["dimensions"][0]["gridSlots"][0]["gridName"], "我的生活")
+
+        grids = service.list_grids({"limit": 100})
+        self.assertEqual(grids["grids"][0]["name"], "我的生活")
+        self.assertEqual(grids["grids"][0]["slots"][0]["lifeDimension"]["name"], "学习")
+
+        projects = service.list_projects({"limit": 100})
+        self.assertEqual(projects["projects"][0]["note"], "中文 MCP 测试")
+        self.assertEqual(projects["projects"][0]["lifeDimension"]["name"], "学习")
+
+    def test_project_detail_includes_metrics_and_focus_timeline(self) -> None:
+        repository, cache = self.make_repository()
+        self.addCleanup(cache.cleanup)
+        service = server.ToolService(repository)
+
+        project = service.get_project({"projectID": "00000000-0000-0000-0000-000000000001"})
+        self.assertEqual(project["traceSummary"]["textOrMixedCount"], 1)
+
+        trace = service.get_trace({"traceID": "00000000-0000-0000-0000-000000000002"})
+        self.assertEqual(trace["metrics"][0]["name"], "页数")
+
+        timeline = service.project_timeline({"projectID": "00000000-0000-0000-0000-000000000001", "limit": 100})
+        self.assertIn("focus", {item["kind"] for item in timeline["items"]})
+
+    def test_snapshot_validation_reports_orphan_relations(self) -> None:
+        repository, cache = self.make_repository(include_orphan=True)
+        self.addCleanup(cache.cleanup)
+        result = server.ToolService(repository).validate_snapshot({})
+        self.assertEqual(result["relationIntegrity"]["status"], "warning")
+        self.assertEqual(
+            result["relationIntegrity"]["issues"]["tracesWithUnknownProject"]["count"],
+            1,
+        )
 
     def test_stdio_initialize_tools_list_and_tool_call(self) -> None:
         repository, cache = self.make_repository()
@@ -165,6 +328,8 @@ class WhatSticksMCPTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["serverInfo"]["version"], server.SERVER_VERSION)
         names = {item["name"] for item in responses[1]["result"]["tools"]}
         self.assertIn("whatsticks_daily_stats", names)
+        self.assertIn("whatsticks_list_dimensions", names)
+        self.assertIn("whatsticks_validate_snapshot", names)
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertIn("WS-MCP-20261019", responses[2]["result"]["structuredContent"]["traces"][0]["textPreview"])
 

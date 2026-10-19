@@ -1,8 +1,11 @@
 # WhatSticks MCP
 
-这是 WhatSticks 的只读、stdio MCP Server。它读取 iPhone 通过 WebDAV 发布的
+这是 WhatSticks 的只读、stdio MCP Server，服务于单向数据流
+“iPhone App → WebDAV → MCP”。它读取 iPhone 通过 WebDAV 发布的
 `current.json`、不可变 release、JSON 分片和媒体索引；不会调用 `PUT`、`DELETE`、
 `MOVE` 或 `MKCOL`，也不会把图片二进制塞进 MCP 文本输出。
+
+本版本不执行 WebDAV → iPhone 导入、不修改 iPhone 数据，也不提供 WebDAV 写入工具。
 
 运行时只依赖 Python 3.9+ 标准库，不需要 `pip install`。生产配置保存地址、用户名、
 远端目录和缓存目录，第三方应用密码不写入 JSON 配置，而是保存到宿主系统的安全凭据存储。
@@ -92,7 +95,7 @@ setup 先完成 Keychain 写入，再用同目录临时文件、flush/fsync 和�
   --config <config path>
 ```
 
-交互式 setup 会要求输入尚未通过参数提供的坚果云 HTTPS WebDAV 地址、用户名、专用目录和缓存目录，
+交互式 setup 会要求输入尚未通过参数提供的 HTTPS WebDAV 地址、用户名、专用目录和缓存目录，
 以及第三方应用密码，并把密码写入当前系统支持的安全凭据存储。Agent 可以通过下面这些非敏感
 参数预填前三项，缓存目录由 Agent 选择；`--password` 故意不存在，密码只能由 setup 在隐藏输入中读取：
 
@@ -153,16 +156,21 @@ printf '%s\n' \
 
 ## 工具与统计口径
 
-- `whatsticks_status`：协议版本、generation、发布设备、实体计数和缓存是否滞后。
-- `whatsticks_list_projects`：项目名/备注普通子串搜索，默认排除已删除和已归档项目。
-- `whatsticks_search_traces`：中文大小写无关普通子串匹配，可按项目和 UTC 时间过滤。
-- `whatsticks_get_trace`：返回完整正文（有长度上限）以及媒体存在状态、内容类型、哈希和关联 ID。
-- `whatsticks_project_timeline`：合并痕迹和项目活动事件，时间过滤按 UTC。
+- `whatsticks_status`：协议版本、generation、发布设备、原始/未删除实体计数、缓存状态和关联完整性摘要。
+- `whatsticks_validate_snapshot`：检查项目、维度、九宫格、痕迹、媒体、日课、活动和指标之间的关联，报告缺失引用。
+- `whatsticks_list_dimensions`：返回生活维度名称、项目数量和九宫格槽位关联。
+- `whatsticks_list_grids`：返回生活九宫格名称、槽位位置和对应生活维度。
+- `whatsticks_list_projects`：项目名/备注普通子串搜索，并返回备注、状态、时间字段和生活维度对象；默认排除已删除和已归档项目。
+- `whatsticks_get_project`：返回单个项目的完整元数据和痕迹摘要。
+- `whatsticks_search_traces`：中文大小写无关普通子串匹配，可按项目和 UTC 时间过滤，并返回生活维度关联。
+- `whatsticks_get_trace`：返回完整正文（有长度上限）、生活维度、痕迹指标以及媒体存在状态、内容类型、哈希和关联 ID。
+- `whatsticks_project_timeline`：合并痕迹、活动事件和专注会话，时间过滤按 UTC。
 - `whatsticks_daily_stats`：`from/to` 使用本地业务日历的 `YYYY-MM-DD` 或 `YYYYMMDD`；
-  每个 `practiceID + dayKey` 只取最终 `isCompleted`，完成/撤销/再完成不会累计操作次数。
-- `whatsticks_list_daily_practices`：返回日课定义及项目/共享链接入口的展示名。
+  每个 `practiceID + dayKey` 只取最终 `isCompleted`，完成/撤销/再完成不会累计操作次数；同时返回完成时间和状态记录更新时间。
+- `whatsticks_list_daily_practices`：返回日课定义及项目/共享链接入口的展示名和生活维度。
 
 所有列表都有默认上限和数字 cursor；MCP 不暴露密码、凭据存储内容或本机原图路径。
+媒体目前只返回索引和校验信息，Agent 不应据此声称已经看到了图片内容。
 
 ## 缓存与故障排查
 
@@ -170,10 +178,10 @@ MCP 会按分片 SHA-256 缓存数据。新的 generation 校验失败或网络�
 缓存，查询会继续使用缓存，并在 `whatsticks_status.cache.state` 标记为 `stale`、附带错误原因；
 没有完整缓存则直接报错。
 
-- `401`：确认用户名和坚果云第三方应用密码，而不是网页登录密码。
+- `401`：确认 WebDAV 用户名和服务商要求的应用专用密码，而不是网页登录密码。
 - `403`：确认专用目录权限和地址，避免把其他目录写进配置。
 - `current.json` / release 校验失败：先在 iPhone 重新完成一次镜像；旧缓存不会被不完整版本替换。
-- 想清理缓存：停止 MCP 后只删除配置中的 `cacheDir`，不会删除坚果云数据；下次查询会重新下载。
+- 想清理缓存：停止 MCP 后只删除配置中的 `cacheDir`，不会删除 WebDAV 数据；下次查询会重新下载。
 
 ## 本地测试
 
@@ -182,5 +190,6 @@ MCP 会按分片 SHA-256 缓存数据。新的 generation 校验失败或网络�
 ```
 
 测试使用内存 fixture 和 GET-only mock reader，覆盖 stdio `initialize`、`tools/list`、
-`tools/call`、中文搜索、分页、日课最终状态、缓存回退和校验失败。它不等价于真实坚果云
+`tools/call`、中文搜索、分页、关联展开、镜像关联诊断、日课最终状态、缓存回退和校验失败。
+它不等价于真实 WebDAV
 账户联调；真实账户结果必须由当前 Agent 和 iPhone 发布后的 generation 另行记录。

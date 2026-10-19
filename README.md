@@ -64,6 +64,20 @@ Agent 应按以下顺序处理：
 安装包：
 `https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.0/WhatSticksMCP-v1.0.0.zip`
 
+SHA-256：请下载同一发布页中的 `WhatSticksMCP-v1.0.0.sha256` 校验文件；调用方应固定
+记录该版本的 SHA-256。不要使用其他分支或其他地址的包。
+
+## 1.0.0 安全修复
+
+v1.0.0 修复了 macOS Keychain setup 的双重密码确认交互。`security` 命令仍使用不带密码值的
+`-w`，密码不会出现在命令参数、Shell 历史、日志或 JSON 配置中；setup 通过子进程标准输入
+提供两次密码确认。密码为空、确认交互失败、Keychain 权限拒绝和其他 Keychain 写入失败会给出
+不同的错误类别，错误信息不会回显密码。
+
+setup 先完成 Keychain 写入，再用同目录临时文件、flush/fsync 和原子替换写入 JSON 配置。
+如果 Keychain 写入失败，不会创建或覆盖配置文件；如果配置原子替换失败，也会保留原配置并
+明确报告现场。本次发布会直接覆盖原 v1.0.0 的发布资产；版本号和下载地址保持不变。
+
 ## 手动运行 setup
 
 下面只是 Server 的运行形态，不是任何 Agent 的注册命令。`<Python 3.9+ executable>`、

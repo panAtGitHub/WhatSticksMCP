@@ -162,7 +162,7 @@ class WhatSticksMCPTests(unittest.TestCase):
             sys.stdin, sys.stdout = old_stdin, old_stdout
         responses = [json.loads(line) for line in output]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "whatsticks")
-        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "1.0.0")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], server.SERVER_VERSION)
         names = {item["name"] for item in responses[1]["result"]["tools"]}
         self.assertIn("whatsticks_daily_stats", names)
         self.assertFalse(responses[2]["result"]["isError"])
@@ -250,6 +250,82 @@ class WhatSticksMCPTests(unittest.TestCase):
         self.assertIn("--remote-folder", help_text)
         self.assertIn("--cache-dir", help_text)
         self.assertNotIn("--password", help_text)
+
+    def test_macos_keychain_receives_two_password_lines_without_password_in_argv(self) -> None:
+        password = "secret-value"
+        command_result = server.subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch.object(server.subprocess, "run", return_value=command_result) as run:
+            server._store_macos_password("com.example.service", "user@example.com", password)
+
+        command = run.call_args.args[0]
+        self.assertNotIn(password, command)
+        self.assertEqual(command[-1], "-w")
+        self.assertEqual(run.call_args.kwargs["input"], f"{password}\n{password}\n")
+        self.assertTrue(run.call_args.kwargs["text"])
+
+    def test_macos_keychain_input_failure_does_not_leak_password(self) -> None:
+        password = "secret-value"
+        command_result = server.subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="security: passwords do not match\n",
+        )
+        with patch.object(server.subprocess, "run", return_value=command_result):
+            with self.assertRaisesRegex(server.MCPError, "用户输入失败") as raised:
+                server._store_macos_password("com.example.service", "user@example.com", password)
+
+        self.assertNotIn(password, str(raised.exception))
+
+    def test_macos_keychain_permission_failure_is_distinct_and_does_not_leak_password(self) -> None:
+        password = "secret-value"
+        command_result = server.subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="security: User interaction is not allowed.\n",
+        )
+        with patch.object(server.subprocess, "run", return_value=command_result):
+            with self.assertRaisesRegex(server.MCPError, "权限问题") as raised:
+                server._store_macos_password("com.example.service", "user@example.com", password)
+
+        self.assertNotIn(password, str(raised.exception))
+
+    def test_setup_keychain_failure_does_not_leave_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "mcp.json"
+            with patch.object(server, "credential_backend_name", return_value="macOS Keychain"), \
+                    patch.object(server.getpass, "getpass", return_value="secret-value"), \
+                    patch.object(server, "store_password", side_effect=server.MCPError("权限问题：Keychain 拒绝写入")):
+                with self.assertRaisesRegex(server.MCPError, "权限问题"):
+                    server.setup(
+                        config_path,
+                        webdav_url="https://dav.example.com/dav/",
+                        username="user@example.com",
+                        remote_folder="WhatSticks",
+                        cache_dir=str(Path(directory) / "cache"),
+                    )
+
+            self.assertFalse(config_path.exists())
+
+    def test_config_replace_failure_preserves_previous_config_and_cleans_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "mcp.json"
+            previous = '{"existing": true}\n'
+            config_path.write_text(previous, encoding="utf-8")
+            config = {"webdavUrl": "https://dav.example.com/dav/", "username": "user@example.com"}
+
+            with patch.object(server.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(server.MCPError, "配置写入失败"):
+                    server._write_config_atomically(config_path, config)
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), previous)
+            self.assertEqual(list(Path(directory).glob(".mcp.json.*.tmp")), [])
 
 
 if __name__ == "__main__":

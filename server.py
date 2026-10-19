@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -29,6 +30,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 FORMAT_VERSION = 1
 SCHEMA_IDENTIFIER = "WhatSticksCoreV2SchemaV3"
+SERVER_VERSION = "1.0.0"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 MAX_LIMIT = 100
@@ -284,7 +286,7 @@ def credential_password(config: ServerConfig) -> str:
         return _macos_keychain_password(config)
     if os.name == "nt":
         return _windows_credential_password(config)
-    raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
+    raise MCPError(f"当前系统暂不支持安全凭据存储；{SERVER_VERSION} 目前支持 macOS 和 Windows。")
 
 
 class WebDAVReader:
@@ -914,7 +916,7 @@ class MCPServer:
                 "result": {
                     "protocolVersion": protocol_version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "whatsticks", "version": "1.0.0"},
+                    "serverInfo": {"name": "whatsticks", "version": SERVER_VERSION},
                     "instructions": "只读读取 WhatSticks WebDAV 镜像；镜像缓存可能滞后并会在 status 中说明。",
                 },
             }
@@ -998,20 +1000,64 @@ def default_config_path() -> Path:
 
 
 def _store_macos_password(service: str, username: str, password: str) -> None:
+    if not password:
+        raise MCPError("用户输入失败：第三方应用密码不能为空，未写入 Keychain。")
+
+    # `security -w` without a value asks for the secret twice.  Keep the
+    # secret out of argv and provide both hidden-input responses through the
+    # child process stdin.  Do not include stderr in user-facing errors:
+    # security output must never become a possible credential disclosure path.
+    command = [
+        "security",
+        "add-generic-password",
+        "-U",
+        "-s",
+        service,
+        "-a",
+        username,
+        "-w",
+    ]
     try:
         result = subprocess.run(
-            ["security", "add-generic-password", "-U", "-s", service, "-a", username, "-w"],
-            input=f"{password}\n",
+            command,
+            input=f"{password}\n{password}\n",
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise MCPError("无法访问 macOS Keychain，请检查系统权限。") from exc
+    except FileNotFoundError as exc:
+        raise MCPError("Keychain 写入失败：找不到 macOS security 命令。") from exc
+    except PermissionError as exc:
+        raise MCPError("权限问题：无法启动 macOS Keychain security 命令，请检查执行权限。") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MCPError("用户输入失败：Keychain 密码确认交互超时，请重试。") from exc
+    except subprocess.SubprocessError as exc:
+        raise MCPError("Keychain 写入失败：macOS security 命令未能完成。") from exc
+    except OSError as exc:
+        raise MCPError("Keychain 写入失败：无法启动 macOS security 命令。") from exc
     if result.returncode != 0:
-        raise MCPError("Keychain 凭据写入失败，请检查系统权限。")
+        diagnostic = str(result.stderr or "").lower()
+        if any(marker in diagnostic for marker in (
+            "passwords do not match",
+            "password data",
+            "end of file",
+            "eof",
+            "stdin",
+            "input",
+        )):
+            raise MCPError("用户输入失败：Keychain 两次密码确认未完成或不一致。")
+        if any(marker in diagnostic for marker in (
+            "permission",
+            "not authorized",
+            "interaction is not allowed",
+            "denied",
+            "errsecauthfailed",
+            "could not be modified",
+        )):
+            raise MCPError("权限问题：macOS Keychain 拒绝写入，请解锁钥匙串并检查授权。")
+        raise MCPError("Keychain 写入失败：macOS security 未能保存凭据。")
 
 
 def _store_windows_password(service: str, username: str, password: str) -> None:
@@ -1059,7 +1105,41 @@ def store_password(service: str, username: str, password: str) -> None:
     if os.name == "nt":
         _store_windows_password(service, username, password)
         return
-    raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
+    raise MCPError(f"当前系统暂不支持安全凭据存储；{SERVER_VERSION} 目前支持 macOS 和 Windows。")
+
+
+def _write_config_atomically(path: Path, config: dict[str, Any]) -> None:
+    """Write a credential-bearing config only after the secure store succeeds."""
+    temporary_path: Path | None = None
+    file_descriptor = -1
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+            file_descriptor = -1
+            stream.write(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except OSError as exc:
+        if file_descriptor != -1:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise MCPError(
+            "配置写入失败：Keychain 凭据已写入，但配置文件未更新；未生成新的无凭据配置，请保留现场并重试。"
+        ) from exc
 
 
 def setup(
@@ -1072,7 +1152,7 @@ def setup(
 ) -> int:
     backend = credential_backend_name()
     if backend is None:
-        raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
+        raise MCPError(f"当前系统暂不支持安全凭据存储；{SERVER_VERSION} 目前支持 macOS 和 Windows。")
     default_cache = default_cache_dir()
     print(f"WhatSticks MCP WebDAV 配置（密码只写入 {backend}）", file=sys.stderr)
     url = (
@@ -1092,7 +1172,6 @@ def setup(
         if cache_dir is not None
         else input(f"本地缓存目录 [{default_cache}]: ").strip() or str(default_cache)
     )
-    password = getpass.getpass("第三方应用密码（不会写入配置文件）: ")
     parts = urlsplit(url)
     if parts.scheme.lower() != "https" or not parts.hostname or parts.username or parts.password:
         raise MCPError("地址必须是没有用户名/密码的 HTTPS 地址。")
@@ -1101,7 +1180,13 @@ def setup(
     folder = normalized_folder(folder)
     if not cache_value:
         raise MCPError("本地缓存目录不能为空。")
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise MCPError("配置目录写入失败：无法创建配置目录。") from exc
+    password = getpass.getpass("第三方应用密码（不会写入配置文件）: ")
+    if not password:
+        raise MCPError("用户输入失败：第三方应用密码不能为空，未写入配置。")
     config = {
         "webdavUrl": url,
         "username": username,
@@ -1109,8 +1194,8 @@ def setup(
         "cacheDir": cache_value,
         "credentialService": "com.dusk.WhatSticks.webdav",
     }
-    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     store_password(config["credentialService"], username, password)
+    _write_config_atomically(config_path, config)
     print(f"已写入配置：{config_path}", file=sys.stderr)
     return 0
 

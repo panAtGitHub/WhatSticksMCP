@@ -3,7 +3,8 @@
 
 Only GET requests are implemented.  Configuration stores the WebDAV URL,
 username, remote folder, and cache location; the password is loaded from the
-macOS Keychain (or an explicitly named test environment variable).
+host operating system's secure credential store (or an explicitly named test
+environment variable).
 """
 
 from __future__ import annotations
@@ -152,13 +153,31 @@ class SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def default_cache_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path("~/Library/Caches/WhatSticksMCP").expanduser()
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return base / "WhatSticksMCP" / "Cache"
+    return Path("~/.cache/WhatSticksMCP").expanduser()
+
+
+def credential_backend_name() -> str | None:
+    if sys.platform == "darwin":
+        return "macOS Keychain"
+    if os.name == "nt":
+        return "Windows Credential Manager"
+    return None
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     webdav_url: str
     username: str
     remote_folder: str
     cache_dir: Path
-    keychain_service: str
+    credential_service: str
     password_env: str | None = None
 
     @classmethod
@@ -179,9 +198,9 @@ class ServerConfig:
         if not username:
             raise MCPError("MCP 配置缺少 username。")
         folder = normalized_folder(str(raw.get("remoteFolder", "WhatSticks")))
-        cache_value = str(raw.get("cacheDir", "~/Library/Caches/WhatSticksMCP"))
+        cache_value = str(raw.get("cacheDir", default_cache_dir()))
         cache_dir = Path(cache_value).expanduser()
-        service = str(raw.get("keychainService", "com.dusk.WhatSticks.webdav"))
+        service = str(raw.get("credentialService", raw.get("keychainService", "com.dusk.WhatSticks.webdav")))
         password_env = raw.get("passwordEnv")
         if password_env is not None:
             password_env = str(password_env)
@@ -190,19 +209,19 @@ class ServerConfig:
             username=username,
             remote_folder=folder,
             cache_dir=cache_dir,
-            keychain_service=service,
+            credential_service=service,
             password_env=password_env,
         )
 
 
-def keychain_password(config: ServerConfig) -> str:
-    if config.password_env:
-        value = os.environ.get(config.password_env)
-        if value:
-            return value
+def _credential_target(service: str, username: str) -> str:
+    return f"WhatSticksMCP/{service}/{username}"
+
+
+def _macos_keychain_password(config: ServerConfig) -> str:
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", config.keychain_service, "-a", config.username, "-w"],
+            ["security", "find-generic-password", "-s", config.credential_service, "-a", config.username, "-w"],
             check=False,
             capture_output=True,
             text=True,
@@ -213,6 +232,59 @@ def keychain_password(config: ServerConfig) -> str:
     if result.returncode != 0 or not result.stdout.strip():
         raise MCPError("没有找到 WebDAV Keychain 凭据，请先运行 setup。")
     return result.stdout.rstrip("\r\n")
+
+
+def _windows_credential_password(config: ServerConfig) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    cred_read = advapi32.CredReadW
+    cred_read.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIAL))]
+    cred_read.restype = wintypes.BOOL
+    cred_free = advapi32.CredFree
+    cred_free.argtypes = [ctypes.c_void_p]
+    cred_free.restype = wintypes.BOOL
+    credential_pointer = ctypes.POINTER(CREDENTIAL)()
+    target = _credential_target(config.credential_service, config.username)
+    if not cred_read(target, 1, 0, ctypes.byref(credential_pointer)):
+        raise MCPError("没有找到 Windows Credential Manager 凭据，请先运行 setup。")
+    try:
+        credential = credential_pointer.contents
+        raw_password = ctypes.string_at(credential.CredentialBlob, credential.CredentialBlobSize)
+        return raw_password.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise MCPError("Windows Credential Manager 中的 WebDAV 凭据无效，请重新运行 setup。") from exc
+    finally:
+        cred_free(credential_pointer)
+
+
+def credential_password(config: ServerConfig) -> str:
+    if config.password_env:
+        value = os.environ.get(config.password_env)
+        if value:
+            return value
+    if sys.platform == "darwin":
+        return _macos_keychain_password(config)
+    if os.name == "nt":
+        return _windows_credential_password(config)
+    raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
 
 
 class WebDAVReader:
@@ -821,7 +893,7 @@ class MCPServer:
         if self.repository is None:
             try:
                 config = ServerConfig.from_file(self.config_path)
-                self.repository = MirrorRepository(config, keychain_password(config))
+                self.repository = MirrorRepository(config, credential_password(config))
                 self.repository_error = None
             except MCPError as exc:
                 self.repository_error = str(exc)
@@ -842,7 +914,7 @@ class MCPServer:
                 "result": {
                     "protocolVersion": protocol_version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "whatsticks", "version": "1.0"},
+                    "serverInfo": {"name": "whatsticks", "version": "1.0.0"},
                     "instructions": "只读读取 WhatSticks WebDAV 镜像；镜像缓存可能滞后并会在 status 中说明。",
                 },
             }
@@ -916,19 +988,96 @@ def default_config_path() -> Path:
     value = os.environ.get("WHATSTICKS_MCP_CONFIG")
     if value:
         return Path(value).expanduser()
-    return Path("~/Library/Application Support/WhatSticks/mcp.json").expanduser()
+    if sys.platform == "darwin":
+        return Path("~/Library/Application Support/WhatSticks/mcp.json").expanduser()
+    if os.name == "nt":
+        app_data = os.environ.get("APPDATA")
+        base = Path(app_data) if app_data else Path.home() / "AppData" / "Roaming"
+        return base / "WhatSticks" / "mcp.json"
+    return Path("~/.config/WhatSticks/mcp.json").expanduser()
+
+
+def _store_macos_password(service: str, username: str, password: str) -> None:
+    try:
+        result = subprocess.run(
+            ["security", "add-generic-password", "-U", "-s", service, "-a", username, "-w"],
+            input=f"{password}\n",
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MCPError("无法访问 macOS Keychain，请检查系统权限。") from exc
+    if result.returncode != 0:
+        raise MCPError("Keychain 凭据写入失败，请检查系统权限。")
+
+
+def _store_windows_password(service: str, username: str, password: str) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    password_bytes = password.encode("utf-8")
+    password_buffer = ctypes.create_string_buffer(password_bytes)
+    credential = CREDENTIAL()
+    credential.Type = 1  # CRED_TYPE_GENERIC
+    credential.TargetName = _credential_target(service, username)
+    credential.CredentialBlobSize = len(password_bytes)
+    credential.CredentialBlob = ctypes.cast(password_buffer, ctypes.POINTER(ctypes.c_ubyte))
+    credential.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE
+    credential.UserName = username
+
+    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    cred_write = advapi32.CredWriteW
+    cred_write.argtypes = [ctypes.POINTER(CREDENTIAL), wintypes.DWORD]
+    cred_write.restype = wintypes.BOOL
+    if not cred_write(ctypes.byref(credential), 0):
+        raise MCPError("Windows Credential Manager 凭据写入失败，请检查系统权限。")
+
+
+def store_password(service: str, username: str, password: str) -> None:
+    if sys.platform == "darwin":
+        _store_macos_password(service, username, password)
+        return
+    if os.name == "nt":
+        _store_windows_password(service, username, password)
+        return
+    raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
 
 
 def setup(config_path: Path) -> int:
-    print("WhatSticks MCP WebDAV 配置（密码只写入 macOS Keychain）", file=sys.stderr)
+    backend = credential_backend_name()
+    if backend is None:
+        raise MCPError("当前系统暂不支持安全凭据存储；v1.0.0 目前支持 macOS 和 Windows。")
+    default_cache = default_cache_dir()
+    print(f"WhatSticks MCP WebDAV 配置（密码只写入 {backend}）", file=sys.stderr)
     url = input("WebDAV HTTPS 地址 [https://dav.jianguoyun.com/dav/]: ").strip() or "https://dav.jianguoyun.com/dav/"
     username = input("邮箱或用户名: ").strip()
     folder = input("远端目录 [WhatSticks]: ").strip() or "WhatSticks"
-    cache_dir = input("本地缓存目录 [~/Library/Caches/WhatSticksMCP]: ").strip() or "~/Library/Caches/WhatSticksMCP"
+    cache_dir = input(f"本地缓存目录 [{default_cache}]: ").strip() or str(default_cache)
     password = getpass.getpass("第三方应用密码（不会写入配置文件）: ")
     parts = urlsplit(url)
     if parts.scheme.lower() != "https" or not parts.hostname or parts.username or parts.password:
         raise MCPError("地址必须是没有用户名/密码的 HTTPS 地址。")
+    if not username:
+        raise MCPError("用户名不能为空。")
     folder = normalized_folder(folder)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config = {
@@ -936,19 +1085,10 @@ def setup(config_path: Path) -> int:
         "username": username,
         "remoteFolder": folder,
         "cacheDir": cache_dir,
-        "keychainService": "com.dusk.WhatSticks.webdav",
+        "credentialService": "com.dusk.WhatSticks.webdav",
     }
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    result = subprocess.run(
-        ["security", "add-generic-password", "-U", "-s", config["keychainService"], "-a", username, "-w"],
-        input=f"{password}\n",
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise MCPError("Keychain 凭据写入失败，请检查 macOS Keychain 权限。")
+    store_password(config["credentialService"], username, password)
     print(f"已写入配置：{config_path}", file=sys.stderr)
     return 0
 
@@ -956,7 +1096,7 @@ def setup(config_path: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WhatSticks read-only WebDAV MCP server")
     parser.add_argument("--config", type=Path, default=default_config_path())
-    parser.add_argument("--setup", action="store_true", help="交互式写入配置和 macOS Keychain 凭据")
+    parser.add_argument("--setup", action="store_true", help="交互式写入配置和当前系统的安全凭据")
     args = parser.parse_args(argv)
     try:
         if args.setup:

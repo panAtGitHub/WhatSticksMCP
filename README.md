@@ -5,7 +5,7 @@
 `MOVE` 或 `MKCOL`，也不会把图片二进制塞进 MCP 文本输出。
 
 运行时只依赖 Python 3.9+ 标准库，不需要 `pip install`。生产配置保存地址、用户名、
-远端目录和缓存目录，第三方应用密码不写入 JSON 配置。
+远端目录和缓存目录，第三方应用密码不写入 JSON 配置，而是保存到宿主系统的安全凭据存储。
 
 ## 先分清三种位置
 
@@ -13,7 +13,7 @@
 Agent 的配置文件路径。下面三类位置由不同层负责：
 
 1. **Server 文件**：Release 压缩包解压后的目录。应由用户或 Agent 选择当前运行环境中
-   合适的用户级目录；没有所谓“ChatGPT 通用安装目录”或“所有 Agent 通用安装目录”。
+   合适的用户级目录；不存在所有 Agent 共用的通用安装目录。
 2. **WhatSticks 运行配置**：通过 `server.py --config` 指定的 JSON 文件。它保存 WebDAV
    地址、用户名、远端目录和缓存目录，不是 Agent 的 MCP 注册表，也不保存密码。
 3. **Agent 注册信息**：由当前 Agent 自己管理。不同 Agent 可能使用命令、设置页面、插件
@@ -26,8 +26,10 @@ Agent 的配置文件路径。下面三类位置由不同层负责：
 ## 当前版本兼容性
 
 - Python 3.9 或更高版本。当前实现已在 Python 3.9.6 验证；3.8 及更低版本暂不声明支持。
-- 当前版本使用 macOS Keychain 保存第三方应用密码，因此 `--setup` 当前只支持 macOS；
-  这是此版本 Server 的实现限制，不是 WhatSticks App 对用户运行环境的假设。
+- macOS 使用 Keychain，Windows 使用 Windows Credential Manager 保存第三方应用密码；密码不写入
+  JSON 配置、命令参数或日志。
+- v1.0.0 的 `--setup` 暂只支持 macOS 和 Windows。其他系统必须先由 Agent 报告不兼容，不能
+  用明文文件或未说明的替代方案绕过安全凭据存储。
 - 当前版本是本地 stdio Server。目标 Agent 是否能使用它，必须由 Agent 根据自身官方文档
   和能力判断。
 
@@ -43,32 +45,32 @@ Agent 应按以下顺序处理：
    未固定代码。
 3. 选择用户级 Server 安装目录，并单独选择运行配置文件路径；不要把其中任何路径冒充成
    Agent 的官方目录。
-4. 运行包内正式的 `--setup` 流程。用户名和第三方应用密码只在 Agent 运行环境提供的
+4. 运行包内正式的 `--setup` 流程。安装包会根据宿主系统选择受支持的安全凭据存储。用户名和第三方应用密码只在 Agent 运行环境提供的
    安全交互式输入界面中输入，不要进入聊天、命令参数、Shell 历史、日志或明文配置。
 5. 使用当前 Agent 原生支持的 MCP 注册方式；如果它不支持本地 stdio，停止并说明原因。
 6. 验证 `initialize`、`tools/list` 和 `whatsticks_status`，最后报告实际运行环境、Server
    目录、运行配置路径、注册结果和验证结果。
 
-当前版本：`1.0.2`
+当前版本：`1.0.0`
 
 安装包：
-`https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.2/WhatSticksMCP-v1.0.2.zip`
+`https://github.com/panAtGitHub/WhatSticksMCP/releases/download/v1.0.0/WhatSticksMCP-v1.0.0.zip`
 
 ## 手动运行 setup
 
-下面只是 Server 的运行形态，不是任何 Agent 的注册命令。将占位符替换为当前环境中的
-实际路径：
+下面只是 Server 的运行形态，不是任何 Agent 的注册命令。`<Python 3.9+ executable>`、
+`<server.py path>` 和 `<config path>` 都必须由当前 Agent 根据实际环境替换；这段参数示意
+不预设操作系统或 Shell：
 
-```bash
-python3 \
-  /path/to/WhatSticksMCP-v1.0.2/server.py \
+```text
+<Python 3.9+ executable> \
+  <server.py path> \
   --setup \
-  --config /path/to/whatsticks-runtime.json
+  --config <config path>
 ```
 
-交互式 setup 会要求输入坚果云 HTTPS WebDAV 地址、用户名、专用目录和第三方应用密码。
-当前版本会把密码交给 macOS `security` 工具写入 Keychain；不要把密码放进 Shell 命令、
-配置文件或聊天记录。
+交互式 setup 会要求输入坚果云 HTTPS WebDAV 地址、用户名、专用目录和第三方应用密码，
+并把密码写入当前系统支持的安全凭据存储。不要把密码放进 Shell 命令、配置文件或聊天记录。
 
 配置文件形状如下（密码字段故意不存在）：
 
@@ -77,8 +79,8 @@ python3 \
   "webdavUrl": "https://dav.jianguoyun.com/dav/",
   "username": "your-account@example.com",
   "remoteFolder": "WhatSticks",
-  "cacheDir": "<user-cache-directory>",
-  "keychainService": "com.dusk.WhatSticks.webdav"
+  "cacheDir": "<platform-appropriate-user-cache-directory>",
+  "credentialService": "com.dusk.WhatSticks.webdav"
 }
 ```
 
@@ -99,15 +101,16 @@ name: whatsticks
 实际字段名、设置入口、插件格式和配置位置必须以当前 Agent 的官方文档为准。不要把上述
 逻辑形态直接当作某个产品的可复制配置。
 
-注册前可以先用 stdio 自检。日志只写 stderr，stdout 只有 JSON-RPC 响应：
+注册前可以先用 stdio 自检。日志只写 stderr，stdout 只有 JSON-RPC 响应。下面是 POSIX Shell
+示意；Windows 或其他环境应由当前 Agent 使用等价的进程调用方式：
 
 ```bash
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | python3 \
-      /path/to/server.py \
-      --config /path/to/whatsticks-runtime.json
+  | <Python 3.9+ executable> \
+      <server.py path> \
+      --config <config path>
 ```
 
 在 iPhone 的 WhatSticks「更多 → 数据恢复 → WebDAV 数据镜像」中先完成连接测试和一次
@@ -125,7 +128,7 @@ printf '%s\n' \
   每个 `practiceID + dayKey` 只取最终 `isCompleted`，完成/撤销/再完成不会累计操作次数。
 - `whatsticks_list_daily_practices`：返回日课定义及项目/共享链接入口的展示名。
 
-所有列表都有默认上限和数字 cursor；MCP 不暴露密码、Keychain 内容或本机原图路径。
+所有列表都有默认上限和数字 cursor；MCP 不暴露密码、凭据存储内容或本机原图路径。
 
 ## 缓存与故障排查
 
@@ -140,8 +143,8 @@ MCP 会按分片 SHA-256 缓存数据。新的 generation 校验失败或网络�
 
 ## 本地测试
 
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+```text
+<Python 3.9+ executable> -m unittest discover -s tests -p 'test_*.py'
 ```
 
 测试使用内存 fixture 和 GET-only mock reader，覆盖 stdio `initialize`、`tools/list`、

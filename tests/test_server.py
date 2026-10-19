@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import sys
 
@@ -123,7 +124,7 @@ class WhatSticksMCPTests(unittest.TestCase):
             username="fixture@example.com",
             remote_folder="WhatSticks",
             cache_dir=Path(cache.name),
-            keychain_service="fixture",
+            credential_service="fixture",
         )
         repository = server.MirrorRepository(config, "not-used")
         repository.reader = FixtureReader(make_fixture())  # type: ignore[assignment]
@@ -161,6 +162,7 @@ class WhatSticksMCPTests(unittest.TestCase):
             sys.stdin, sys.stdout = old_stdin, old_stdout
         responses = [json.loads(line) for line in output]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "whatsticks")
+        self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "1.0.0")
         names = {item["name"] for item in responses[1]["result"]["tools"]}
         self.assertIn("whatsticks_daily_stats", names)
         self.assertFalse(responses[2]["result"]["isError"])
@@ -176,6 +178,31 @@ class WhatSticksMCPTests(unittest.TestCase):
         fallback = repository.load()
         self.assertTrue(fallback.stale)
         self.assertEqual(fallback.current["generationID"], "fixture-generation")
+
+    def test_config_uses_platform_neutral_credential_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mcp.json"
+            path.write_text(json.dumps({
+                "webdavUrl": "https://dav.example.com/dav/",
+                "username": "user@example.com",
+                "remoteFolder": "WhatSticks",
+                "cacheDir": directory,
+                "credentialService": "com.example.whatsticks",
+            }), encoding="utf-8")
+            config = server.ServerConfig.from_file(path)
+        self.assertEqual(config.credential_service, "com.example.whatsticks")
+
+    def test_unsupported_platform_reports_secure_store_requirement(self) -> None:
+        config = server.ServerConfig(
+            webdav_url="https://fixture.invalid/dav/",
+            username="fixture@example.com",
+            remote_folder="WhatSticks",
+            cache_dir=Path("/tmp/whatsticks-test-cache"),
+            credential_service="fixture",
+        )
+        with patch.object(server.sys, "platform", "linux"), patch.object(server.os, "name", "posix"):
+            with self.assertRaisesRegex(server.MCPError, "支持 macOS 和 Windows"):
+                server.credential_password(config)
 
 
 if __name__ == "__main__":

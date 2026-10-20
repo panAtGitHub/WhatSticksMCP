@@ -30,7 +30,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 FORMAT_VERSION = 1
 SCHEMA_IDENTIFIER = "WhatSticksCoreV2SchemaV3"
-SERVER_VERSION = "1.0.0"
+VERSION_FILE = Path(__file__).with_name("VERSION")
+try:
+    SERVER_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0+source"
+except OSError:
+    SERVER_VERSION = "0.0.0+source"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 MAX_LIMIT = 100
@@ -1026,6 +1030,10 @@ def _store_macos_password(service: str, username: str, password: str) -> None:
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
+            # Terminal.app gives the setup process a controlling TTY.  Without
+            # a new session, `security -w` can read its two prompts from
+            # /dev/tty instead of the stdin pipe supplied above.
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise MCPError("Keychain 写入失败：找不到 macOS security 命令。") from exc

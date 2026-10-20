@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import errno
 import io
 import json
+import os
 from pathlib import Path
+import select
+import shutil
+import signal
+import subprocess
 import tempfile
+import time
 import unittest
+import uuid
 from unittest.mock import patch
+
+try:
+    import pty
+except ImportError:  # pragma: no cover - Windows has no PTY module
+    pty = None  # type: ignore[assignment]
 
 import sys
 
@@ -267,6 +280,17 @@ class WhatSticksMCPTests(unittest.TestCase):
         self.assertEqual(command[-1], "-w")
         self.assertEqual(run.call_args.kwargs["input"], f"{password}\n{password}\n")
         self.assertTrue(run.call_args.kwargs["text"])
+        self.assertTrue(run.call_args.kwargs["start_new_session"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
+
+    def test_macos_keychain_timeout_is_safe(self) -> None:
+        password = "secret-value"
+        timeout = subprocess.TimeoutExpired(["security", "-w"], 10)
+        with patch.object(server.subprocess, "run", side_effect=timeout):
+            with self.assertRaisesRegex(server.MCPError, "用户输入失败：Keychain 密码确认交互超时") as raised:
+                server._store_macos_password("com.example.service", "user@example.com", password)
+
+        self.assertNotIn(password, str(raised.exception))
 
     def test_macos_keychain_input_failure_does_not_leak_password(self) -> None:
         password = "secret-value"
@@ -326,6 +350,128 @@ class WhatSticksMCPTests(unittest.TestCase):
 
             self.assertEqual(config_path.read_text(encoding="utf-8"), previous)
             self.assertEqual(list(Path(directory).glob(".mcp.json.*.tmp")), [])
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" and pty is not None and shutil.which("security"),
+        "requires macOS security and a controlling PTY",
+    )
+    def test_setup_under_terminal_pty_writes_and_updates_keychain(self) -> None:
+        service = "com.dusk.WhatSticks.webdav"
+        username = f"WhatSticksMCPTests+{uuid.uuid4().hex}@example.invalid"
+        first_password = f"TtyTestFirst-{uuid.uuid4().hex}"
+        second_password = f"TtyTestSecond-{uuid.uuid4().hex}"
+
+        def run_setup(config_path: Path, password: str) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory() as cache_directory:
+                pid, master_fd = pty.fork()
+                if pid == 0:
+                    os.execv(
+                        sys.executable,
+                        [
+                            sys.executable,
+                            str(Path(server.__file__).resolve()),
+                            "--setup",
+                            "--config",
+                            str(config_path),
+                            "--webdav-url",
+                            "https://dav.example.invalid/dav/",
+                            "--username",
+                            username,
+                            "--remote-folder",
+                            "WhatSticks",
+                            "--cache-dir",
+                            str(Path(cache_directory) / "cache"),
+                        ],
+                    )
+
+                output = bytearray()
+                child_status: int | None = None
+                deadline = time.monotonic() + 20
+                marker = "第三方应用密码".encode()
+                try:
+                    while marker not in output:
+                        if time.monotonic() >= deadline:
+                            raise AssertionError(f"setup password prompt timed out: {output!r}")
+                        ready, _, _ = select.select([master_fd], [], [], 0.25)
+                        if not ready:
+                            continue
+                        try:
+                            output.extend(os.read(master_fd, 4096))
+                        except OSError as exc:
+                            if exc.errno == errno.EIO:
+                                raise AssertionError(f"setup exited before password prompt: {output!r}") from exc
+                            raise
+                    os.write(master_fd, f"{password}\n".encode())
+
+                    while child_status is None and time.monotonic() < deadline:
+                        ready, _, _ = select.select([master_fd], [], [], 0.25)
+                        if ready:
+                            try:
+                                chunk = os.read(master_fd, 4096)
+                            except OSError as exc:
+                                if exc.errno == errno.EIO:
+                                    chunk = b""
+                                else:
+                                    raise
+                            if chunk:
+                                output.extend(chunk)
+                        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+                        if waited_pid == pid:
+                            child_status = status
+
+                    if child_status is None:
+                        raise AssertionError(f"setup did not exit within 20 seconds: {output!r}")
+                    return os.waitstatus_to_exitcode(child_status), output.decode(errors="replace")
+                finally:
+                    try:
+                        os.close(master_fd)
+                    except OSError:
+                        pass
+                    if child_status is None:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            os.waitpid(pid, 0)
+                        except ChildProcessError:
+                            pass
+
+        def read_keychain() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-a", username, "-w"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                config_path = Path(directory) / "mcp.json"
+                first_code, first_output = run_setup(config_path, first_password)
+                self.assertEqual(first_code, 0, first_output)
+                self.assertNotIn(first_password, first_output)
+                self.assertNotIn("password", json.loads(config_path.read_text(encoding="utf-8")))
+                first_item = read_keychain()
+                self.assertEqual(first_item.returncode, 0, first_item.stderr)
+                self.assertEqual(first_item.stdout.strip(), first_password)
+
+                second_code, second_output = run_setup(config_path, second_password)
+                self.assertEqual(second_code, 0, second_output)
+                self.assertNotIn(second_password, second_output)
+                second_item = read_keychain()
+                self.assertEqual(second_item.returncode, 0, second_item.stderr)
+                self.assertEqual(second_item.stdout.strip(), second_password)
+        finally:
+            subprocess.run(
+                ["security", "delete-generic-password", "-s", service, "-a", username],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
 
 
 if __name__ == "__main__":

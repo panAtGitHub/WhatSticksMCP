@@ -4,6 +4,9 @@
 `current.json`、不可变 release、JSON 分片和媒体索引；不会调用 `PUT`、`DELETE`、
 `MOVE` 或 `MKCOL`，也不会把图片二进制塞进 MCP 文本输出。
 
+当前发布版本：`1.0.3`。版本遵循 `MAJOR.MINOR.PATCH`；后续兼容性修复和小幅改进只递增第三位，
+不会复用已经发布的版本号。
+
 运行时只依赖 Python 3.9+ 标准库，不需要 `pip install`。生产配置保存地址、用户名、
 远端目录和缓存目录，第三方应用密码不写入 JSON 配置，而是保存到宿主系统的安全凭据存储。
 
@@ -28,7 +31,7 @@ Agent 的配置文件路径。下面三类位置由不同层负责：
 - Python 3.9 或更高版本。当前实现已在 Python 3.9.6 验证；3.8 及更低版本暂不声明支持。
 - macOS 使用 Keychain，Windows 使用 Windows Credential Manager 保存第三方应用密码；密码不写入
   JSON 配置、命令参数或日志。
-- v1.0.0 的 `--setup` 暂只支持 macOS 和 Windows。其他系统必须先由 Agent 报告不兼容，不能
+- v1.0.3 的 `--setup` 暂只支持 macOS 和 Windows。其他系统必须先由 Agent 报告不兼容，不能
   用明文文件或未说明的替代方案绕过安全凭据存储。
 - 当前版本是本地 stdio Server。目标 Agent 是否能使用它，必须由 Agent 根据自身官方文档
   和能力判断。
@@ -68,16 +71,18 @@ Agent 应按以下顺序处理：
 发布维护者运行 `scripts/package_release.sh` 后，应将 `dist/WhatSticksMCP.zip` 作为每个
 Release 的稳定别名一并上传；这样已有 App 无需更新就能获取最新版本。
 
-## 1.0.0 安全修复
+## 1.0.3 修复
 
-当前发布版本修复了 macOS Keychain setup 的双重密码确认交互。`security` 命令仍使用不带密码值的
-`-w`，密码不会出现在命令参数、Shell 历史、日志或 JSON 配置中；setup 通过子进程标准输入
-提供两次密码确认。密码为空、确认交互失败、Keychain 权限拒绝和其他 Keychain 写入失败会给出
-不同的错误类别，错误信息不会回显密码。
+本次发布修复了 macOS Terminal.app 中 Keychain setup 的双重密码确认交互。`security` 命令仍使用
+不带密码值的 `-w`，密码不会出现在命令参数、Shell 历史、日志或 JSON 配置中；setup 通过子进程
+标准输入提供两次密码确认，并让 `security` 子进程通过 `start_new_session=True` 脱离父进程的控制
+TTY，避免它错误地从 `/dev/tty` 读取确认内容。密码为空、确认交互失败、Keychain 权限拒绝和其他
+Keychain 写入失败会给出不同的错误类别，错误信息不会回显密码。
 
 setup 先完成 Keychain 写入，再用同目录临时文件、flush/fsync 和原子替换写入 JSON 配置。
 如果 Keychain 写入失败，不会创建或覆盖配置文件；如果配置原子替换失败，也会保留原配置并
-明确报告现场。本次发布会直接覆盖原 v1.0.0 的发布资产；版本号和下载地址保持不变。
+明确报告现场。此次发布保留历史版本，并更新稳定别名 `WhatSticksMCP.zip`；App 继续使用
+`https://github.com/panAtGitHub/WhatSticksMCP/releases/latest/download/WhatSticksMCP.zip`，无需更新提示词。
 
 ## 手动运行 setup
 
@@ -182,5 +187,6 @@ MCP 会按分片 SHA-256 缓存数据。新的 generation 校验失败或网络�
 ```
 
 测试使用内存 fixture 和 GET-only mock reader，覆盖 stdio `initialize`、`tools/list`、
-`tools/call`、中文搜索、分页、日课最终状态、缓存回退和校验失败。它不等价于真实坚果云
+`tools/call`、中文搜索、分页、日课最终状态、缓存回退、校验失败和 Keychain setup 的安全输入。
+macOS 测试还会在真实控制 TTY 下验证新建及更新 Keychain 项。它不等价于真实坚果云
 账户联调；真实账户结果必须由当前 Agent 和 iPhone 发布后的 generation 另行记录。
